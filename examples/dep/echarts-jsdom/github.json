@@ -1,7 +1,7 @@
 {
-  "owner": "obsidiansystems",
-  "repo": "echarts-jsdom",
-  "branch": "dn-add-on-events",
-  "rev": "2b448858b9ba4095b9dc715e3913285439c11e12",
-  "sha256": "0arc3kf7bxl335m8d0km82q30zdp4isvkim7rxqqxk7x6xyxa7iy"
+  "owner":"dustinnorwood",
+  "repo":"echarts-jsdom",
+  "branch":"master",
+  "rev": "746616b6ecaa729ac3858840f804fd55bb698781",
+  "sha256": "06ggk2abw11v1b5nqv4ycxa5ghj1gmj61ar44ywa9cr89h11na47"
 }
