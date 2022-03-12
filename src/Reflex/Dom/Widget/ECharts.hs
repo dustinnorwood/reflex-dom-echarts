@@ -14,10 +14,11 @@ module Reflex.Dom.Widget.ECharts
   , lineChart
   , timeLineChart
   , BarChartConfig(..)
-  , Chart(..)
   , TimeBarChartConfig(..)
   , barChart
   , timeBarChart
+  , ScatterChartConfig(..)
+  , scatterChart
   , module X
   )
   where
@@ -42,6 +43,11 @@ import Reflex.Network
 
 type XAxisData = Text
 
+data Chart t = Chart
+  { _chart_rendered :: Event t ()
+  , _chart_finished :: Event t ()
+  }
+
 data LineChartConfig t k = LineChartConfig
   -- XXX Can be made a Dynamic
   -- and use this API to adjust size
@@ -54,11 +60,6 @@ data LineChartConfig t k = LineChartConfig
     , Dynamic t (Map XAxisData (Data SeriesLine))
     , Dynamic t [XAxisData]
     )
-  }
-
-data Chart t = Chart
-  { _chart_rendered :: Event t ()
-  , _chart_finished :: Event t ()
   }
 
 lineChart
@@ -93,7 +94,6 @@ lineChart c = do
     X.onRenderedAction chart (liftIO $ onActionR ())
     X.onFinishedAction chart (liftIO $ onActionF ())
     return chart
-
   void $ widgetHold blank $ ffor chartEv $ \chart -> do
     void $ networkView $ ffor cDyn $ \opt -> do
       -- set first options
@@ -120,7 +120,6 @@ lineChart c = do
             toJSVal xs
 
           return (sVal, (,) i <$> ev)
-
       let
         updEv = mergeList $ map snd vs
         seriesJSVals = map fst vs
@@ -246,11 +245,6 @@ data BarChartConfig t k = BarChartConfig
     )
   }
 
-data Chart t = Chart
-  { _chart_rendered :: Event t ()
-  , _chart_finished :: Event t ()
-  }
-
 barChart
   :: forall t m k .
      ( PostBuild t m
@@ -340,8 +334,7 @@ data TimeBarChartConfig t k = TimeBarChartConfig
   , _timeBarChartConfig_options :: Dynamic t ChartOptions
   , _timeBarChartConfig_appendData :: Map k
     ( Series SeriesBar
-    , Int -- max number of data points
-    , Event t [(UTCTime, Double)]
+    , Event t [(XAxisData, Double)]
     )
   }
 
@@ -384,7 +377,7 @@ timeBarChart c = do
       -- set first options
       optVObj <- liftJSM $ makeObject =<< toJSVal opt
 
-      vs <- forM (Map.elems $ _timeBarChartConfig_appendData c) $ \(s, len, ev) -> do
+      vs <- forM (Map.elems $ _timeBarChartConfig_appendData c) $ \(s, ev) -> do
         -- series object
         sVal <- liftJSM (makeObject =<< toJSVal (Some.Some $ SeriesT_Bar s))
 
@@ -393,13 +386,11 @@ timeBarChart c = do
             let
               -- The timebar needs special data object with name and value fields
               -- the value has to be a tuple like this to render properly
-              f :: (UTCTime, Double) -> Data SeriesBar
+              f :: (Text, Double) -> Data SeriesBar
               f (t, v) = def
-                & data_name ?~ utcTimeToEpoch t
-                & data_value ?~ (utcTimeToEpoch t, v)
-            n <- mapM toJSVal (map f vs)
-
-            let newArrV = (drop ((length arr) + (length n) - len) arr) ++ n
+                & data_name ?~ t
+                & data_value ?~ (t, v)
+            newArrV <- mapM toJSVal vs
             v <- toJSVal newArrV
             setProp "data" v sVal
             return $ newArrV
@@ -419,6 +410,102 @@ timeBarChart c = do
         -- This is a workaround, see the comments above
         liftIO $ onActionR ()
         liftIO $ onActionF ()
+
+  return (Chart evR evF)
+
+data ScatterChartConfig t k = ScatterChartConfig
+  -- XXX Can be made a Dynamic
+  -- and use this API to adjust size
+  -- https://ecomfe.github.io/echarts-doc/public/en/api.html#echartsInstance.resize
+  { _scatterChartConfig_size :: (Int, Int)
+  -- We will re-create the whole chart if the options change
+  , _scatterChartConfig_options :: Dynamic t ChartOptions
+  , _scatterChartConfig_series :: Map k
+    ( Series SeriesScatter
+    , Dynamic t (Map Text (Data SeriesScatter))
+    , Dynamic t [Text]
+    )
+  }
+
+scatterChart
+  :: forall t m k .
+     ( PostBuild t m
+     , DomBuilder t m
+     , PerformEvent t m
+     , MonadJSM m
+     , MonadJSM (Performable m)
+     , MonadHold t m
+     , TriggerEvent t m
+     , GhcjsDomSpace ~ DomBuilderSpace m
+     )
+  => ScatterChartConfig t k
+  -> m (Chart t)
+scatterChart c = do
+  let
+    cDyn = _scatterChartConfig_options c
+    attr = (_scatterChartConfig_size c) & \(w, h) ->
+      "style" =: ("width:" <> tshow w <> "px; height:" <> tshow h <> "px;")
+  e <- fst <$> elAttr' "div" attr blank
+
+  -- The initialization is done using PostBuild because the element need
+  -- to be present in the DOM before calling echarts APIs
+  p <- getPostBuild
+  (evR, onActionR) <- newTriggerEvent
+  (evF, onActionF) <- newTriggerEvent
+
+  -- Init the chart
+  chartEv <- performEvent $ ffor p $ \_ -> liftJSM $ do
+    chart <- X.initECharts $ _element_raw e
+    X.onRenderedAction chart (liftIO $ onActionR ())
+    X.onFinishedAction chart (liftIO $ onActionF ())
+    return chart
+
+  void $ widgetHold blank $ ffor chartEv $ \chart -> do
+    void $ networkView $ ffor cDyn $ \opt -> do
+      -- set first options
+      optVObj <- liftJSM $ makeObject =<< toJSVal opt
+
+      -- Convert the user specified "series" options to JSVal
+      -- and modify it according to the Dynamic values
+      -- (series, (series.xAxisIndex, xAxis[i].data))
+      -- The (xAxisIndex, xAxis[i].data) are later used to modify the "xAxis" object
+      vs :: [(Object, Event t (Int, JSVal))] <-
+        forM (Map.elems $ _scatterChartConfig_series c) $ \(s, dd, xd) -> do
+          -- series options without the data
+          sVal <- liftJSM (makeObject =<< toJSVal (Some.Some $ SeriesT_Scatter s))
+
+          let
+            i = maybe 0 id (s ^. series_xAxisIndex)
+            yx = (,) <$> dd <*> xd
+
+          ev <- networkView $ ffor yx $ \(m, xs) -> liftJSM $ do
+            -- The ordering of elements is determined by xs
+            -- XXX default value of 0 might be wrong here
+            dv <- toJSVal (map (\x -> Map.findWithDefault (DataInt 0) x m) xs)
+            setProp "data" dv sVal
+            toJSVal xs
+
+          return (sVal, (,) i <$> ev)
+      let
+        updEv = mergeList $ map snd vs
+        seriesJSVals = map fst vs
+
+      performEvent_ $ ffor updEv $ \xs -> liftJSM $ do
+        series <- toJSVal seriesJSVals
+        xAxisObj <- getProp "xAxis" optVObj >>= makeObject
+        let
+          f v = f' v
+            `catch` \(JSException e) -> liftIO $ putStrLn
+            "reflex-dom-echarts: Error in '_scatterChartConfig_series' value.\
+           \ The 'xAxis' for specified 'xAxisIndex' does not exist in 'ChartOptions'"
+          f' (i, v) = do
+              a <- (xAxisObj !! i) >>= makeObject
+              setProp "data" v a
+        mapM_ f xs
+        xAxis <- toJSVal xAxisObj
+        setProp "xAxis" xAxis optVObj
+        setProp "series" series optVObj
+        toJSVal optVObj >>= setOptionWithCatch chart
 
   return (Chart evR evF)
 
